@@ -59,6 +59,22 @@ ENV PATH="/root/.bun/bin:${PATH}"
 
 RUN corepack enable
 
+# Custom tools (installed in build stage, copied to runtime later)
+RUN apt-get update && apt-get install -y socat && rm -rf /var/lib/apt/lists/*
+RUN curl -L https://github.com/steipete/gogcli/releases/download/v0.12.0/gogcli_0.12.0_linux_amd64.tar.gz \
+  | tar -xz -C /usr/local/bin && chmod +x /usr/local/bin/gog
+RUN curl -L https://github.com/cli/cli/releases/download/v2.88.1/gh_2.88.1_linux_amd64.tar.gz \
+  | tar -xz --strip-components=2 -C /usr/local/bin gh_2.88.1_linux_amd64/bin/gh && chmod +x /usr/local/bin/gh
+RUN npm install -g @anthropic-ai/claude-code
+RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh
+# Clone and install claude-max-api-proxy (npm install -g from git creates
+# symlinks to temp dirs that don't survive multi-stage COPY).
+RUN git clone https://github.com/sethschnrt/claude-max-api-proxy.git /tmp/claude-max-api-proxy && \
+    cd /tmp/claude-max-api-proxy && npm install && npm run build && \
+    mkdir -p /usr/local/lib/node_modules/claude-max-api-proxy && \
+    cp -r /tmp/claude-max-api-proxy/. /usr/local/lib/node_modules/claude-max-api-proxy/ && \
+    rm -rf /tmp/claude-max-api-proxy
+
 WORKDIR /app
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
@@ -254,9 +270,27 @@ RUN --mount=type=cache,id=openclaw-bookworm-apt-cache,target=/var/cache/apt,shar
         docker-ce-cli docker-compose-plugin; \
     fi
 
+# Custom CLI tools from build stage
+COPY --from=build /usr/local/bin/gog /usr/local/bin/gog
+COPY --from=build /usr/local/bin/gh /usr/local/bin/gh
+COPY --from=build /usr/local/bin/deno /usr/local/bin/deno
+COPY --from=build /usr/local/lib/node_modules/@anthropic-ai /usr/local/lib/node_modules/@anthropic-ai
+COPY --from=build /usr/local/lib/node_modules/claude-max-api-proxy /usr/local/lib/node_modules/claude-max-api-proxy
+
+# Symlink custom CLI tools
+RUN ln -sf /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js /usr/local/bin/claude \
+ && chmod +x /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js
+RUN ln -sf /usr/local/lib/node_modules/claude-max-api-proxy/dist/server/standalone.js /usr/local/bin/claude-max-api
+RUN mkdir -p /home/node/.deno/bin && ln -sf /usr/local/bin/deno /home/node/.deno/bin/deno \
+ && chown -R node:node /home/node/.deno
+
 # Expose the CLI binary without requiring npm global writes as non-root.
 RUN ln -sf /app/openclaw.mjs /usr/local/bin/openclaw \
  && chmod 755 /app/openclaw.mjs
+
+# Wrapper entrypoint that starts claude-max-api-proxy before the gateway
+COPY --chmod=755 proxy-entrypoint.sh /usr/local/bin/proxy-entrypoint.sh
+COPY --chmod=755 entrypoint.sh /home/node/entrypoint.sh
 
 ENV NODE_ENV=production
 
@@ -279,4 +313,5 @@ USER node
 # For external access from host/ingress, override bind to "lan" and set auth.
 HEALTHCHECK --interval=3m --timeout=10s --start-period=15s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:18789/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+ENTRYPOINT ["/usr/local/bin/proxy-entrypoint.sh"]
 CMD ["node", "openclaw.mjs", "gateway", "--allow-unconfigured"]
