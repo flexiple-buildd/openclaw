@@ -1,5 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
+# Host-specific setup for this Hetzner deployment: see /root/openclaw/LOCAL_SETUP.md
+
 # Opt-in extension dependencies at build time (space-separated directory names).
 # Example: docker build --build-arg OPENCLAW_EXTENSIONS="diagnostics-otel matrix" .
 #
@@ -278,11 +280,18 @@ COPY --from=build /usr/local/lib/node_modules/@anthropic-ai /usr/local/lib/node_
 COPY --from=build /usr/local/lib/node_modules/claude-max-api-proxy /usr/local/lib/node_modules/claude-max-api-proxy
 
 # Symlink custom CLI tools
-RUN ln -sf /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js /usr/local/bin/claude \
- && chmod +x /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js
+RUN ln -sf /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli-wrapper.cjs /usr/local/bin/claude \
+ && chmod +x /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli-wrapper.cjs
 RUN ln -sf /usr/local/lib/node_modules/claude-max-api-proxy/dist/server/standalone.js /usr/local/bin/claude-max-api
 RUN mkdir -p /home/node/.deno/bin && ln -sf /usr/local/bin/deno /home/node/.deno/bin/deno \
  && chown -R node:node /home/node/.deno
+
+# gh wrapper that uses a writable config dir (host-mounted credentials volume)
+RUN mkdir -p /home/node/.local/bin && \
+    printf '#!/bin/sh\nGH_CONFIG_DIR=/home/node/.openclaw/credentials/gh-davinci-config exec /usr/local/bin/gh "$@"\n' \
+      > /home/node/.local/bin/gh && \
+    chmod +x /home/node/.local/bin/gh && \
+    chown -R node:node /home/node/.local
 
 # Expose the CLI binary without requiring npm global writes as non-root.
 RUN ln -sf /app/openclaw.mjs /usr/local/bin/openclaw \
